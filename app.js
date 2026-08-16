@@ -245,6 +245,7 @@ window.addEventListener('hashchange', render);
 async function render() {
   const [route, arg] = parseHash();
   window.scrollTo(0, 0);
+  if (route !== 'cook') leaveCookMode();
   switch (route) {
     case 'cookbook': return viewCookbook(arg);
     case 'testing':  return viewTesting();
@@ -254,6 +255,7 @@ async function render() {
     case 'search':   return viewSearch();
     case 'backup':   return viewBackup();
     case 'shared':   return viewShared(arg);
+    case 'cook':     return viewCook(arg);
     default:         return viewHome();
   }
 }
@@ -287,7 +289,7 @@ function mount(nodes, activeTab) {
   app.innerHTML = '';
   [].concat(nodes).forEach(n => n && app.append(n));
   document.querySelectorAll('.tabbar').forEach(t => t.remove());
-  document.body.append(tabbar(activeTab));
+  if (activeTab !== false) document.body.append(tabbar(activeTab));   // cook mode goes full screen
 }
 
 // ---------- Top-anchored sheet ----------
@@ -589,12 +591,14 @@ async function viewRecipe(id) {
     ? el('div', { class: 'banner' }, n ? `Cooked ${n} time${n > 1 ? 's' : ''} — approve it when you are happy.` : 'Not cooked yet. Log the first attempt below.')
     : el('div', { class: 'banner done' }, r.approvedAt ? `Approved ${fmtDate(r.approvedAt)}` : 'Approved'));
 
-  // ingredients + method
-  if ((r.ingredients || []).length) {
-    const ul = el('ul', { class: 'ing-list' });
-    r.ingredients.forEach(i => ul.append(el('li', {}, el('span', {}, i))));
-    body.append(el('div', { class: 'block' }, el('h4', {}, 'Ingredients'), ul));
+  // cook mode is the main verb once a recipe has steps
+  if ((r.method || []).filter(Boolean).length) {
+    body.append(el('div', { class: 'btn-row' },
+      el('a', { class: 'btn dark block', href: `#/cook/${r.id}` }, 'Start cooking')));
   }
+
+  // ingredients + method
+  if ((r.ingredients || []).length) body.append(ingredientsBlock(r));
   if ((r.method || []).length) {
     const ol = el('ul', { class: 'steps' });
     r.method.forEach(m => ol.append(el('li', {}, m)));
@@ -979,6 +983,221 @@ async function viewForm(id) {
   syncPhotoField();
   mount(wrap, editing ? '' : 'add');
   if (!editing) titleEl.focus();
+}
+
+// ---------- Servings scaling ----------
+/* Ingredients are free text, so scaling only touches a quantity at the START of a line:
+   "200g flour" scales, "Salt and pepper" and "Rice, to serve" are left alone. Handles
+   2, 1.5, 1/2, 1 1/2, ½, 1½ and ranges like "2-3". Results are rounded to something a
+   cook would actually write — quarters and thirds when small, round numbers when big.
+   Purely a view: the stored recipe is never rewritten. */
+const scaleState = {};                       // recipe id -> chosen servings (this session)
+const UNI = { '½': .5, '⅓': 1 / 3, '⅔': 2 / 3, '¼': .25, '¾': .75, '⅕': .2, '⅖': .4, '⅗': .6, '⅘': .8, '⅙': 1 / 6, '⅚': 5 / 6, '⅛': .125, '⅜': .375, '⅝': .625, '⅞': .875 };
+const UNI_CLASS = '½⅓⅔¼¾⅕⅖⅗⅘⅙⅚⅛⅜⅝⅞';
+const QTY_RE = new RegExp(
+  '^\\s*(' +
+    '\\d+\\s+\\d+\\/\\d+' +               // 1 1/2
+    '|\\d+\\s*[' + UNI_CLASS + ']' +      // 1½
+    '|\\d+\\/\\d+' +                      // 1/2
+    '|[' + UNI_CLASS + ']' +              // ½
+    '|\\d+(?:[.,]\\d+)?' +                // 2  or  1.5
+  ')'
+);
+
+function qtyValue(t) {
+  t = String(t).trim();
+  const uni = t.match(new RegExp('[' + UNI_CLASS + ']'));
+  if (uni) {
+    const lead = t.replace(new RegExp('[' + UNI_CLASS + ']'), '').trim().replace(',', '.');
+    return (lead ? parseFloat(lead) : 0) + UNI[uni[0]];
+  }
+  if (t.includes('/')) {
+    const parts = t.split(/\s+/);
+    if (parts.length === 2) {
+      const [a, b] = parts[1].split('/');
+      return parseFloat(parts[0]) + Number(a) / Number(b);
+    }
+    const [a, b] = t.split('/');
+    return Number(a) / Number(b);
+  }
+  return parseFloat(t.replace(',', '.'));
+}
+// Weights round to the nearest 5; counts must not ("12 anchovies" doubled is 24, not 25).
+const MASS_UNIT = /^\s*(g|gr|grams?|kg|ml|cl|l|litres?|liters?|oz|lbs?)\b/i;
+const DECIMAL_UNIT = /^\s*(kg|l|litres?|liters?|lbs?)\b/i;   // 4.5kg reads better than 4½kg
+
+function fmtQty(v, rest = '') {
+  if (!isFinite(v) || v <= 0) return '';
+  const mass = MASS_UNIT.test(rest);
+  if (mass && v >= 20) return String(Math.round(v / 5) * 5);
+  if (mass && DECIMAL_UNIT.test(rest)) return String(+v.toFixed(2));
+  if (v >= 10) return String(Math.round(v));
+  const step = v >= 1 ? 4 : 8;                      // quarters, or eighths under 1
+  const r = Math.round(v * step) / step;
+  const whole = Math.floor(r + 1e-9);
+  const frac = r - whole;
+  const marks = [[0, ''], [.125, '⅛'], [.25, '¼'], [1 / 3, '⅓'], [.375, '⅜'], [.5, '½'], [.625, '⅝'], [2 / 3, '⅔'], [.75, '¾'], [.875, '⅞']];
+  let best = marks[0], bd = 1;
+  for (const m of marks) { const d = Math.abs(frac - m[0]); if (d < bd) { bd = d; best = m; } }
+  if (!best[1]) return String(whole || +r.toFixed(2));
+  return (whole ? whole : '') + best[1];            // "1½", the way a recipe writes it
+}
+function scaleLine(line, f) {
+  const m = line.match(QTY_RE);
+  if (!m) return line;
+  let rest = line.slice(m[0].length);
+  const range = rest.match(new RegExp('^\\s*[-–—]\\s*(\\d+\\/\\d+|\\d+(?:[.,]\\d+)?|[' + UNI_CLASS + '])'));
+  const after = range ? rest.slice(range[0].length) : rest;   // unit sits after the whole range
+  let out = fmtQty(qtyValue(m[1]) * f, after);
+  if (range) { out += '–' + fmtQty(qtyValue(range[1]) * f, after); rest = after; }
+  if (!out) return line;
+  // keep the original spacing: "200g" stays "400g", "2 tbsp" stays "4 tbsp"
+  const gap = /^\s/.test(rest) ? ' ' : '';
+  const tail = rest.trim();
+  return tail ? out + gap + tail : out;
+}
+const scaleFactor = r => {
+  const want = scaleState[r.id];
+  return (r.servings && want) ? want / r.servings : 1;
+};
+const scaledIngredients = r => {
+  const f = scaleFactor(r);
+  return (r.ingredients || []).map(l => (f === 1 ? l : scaleLine(l, f)));
+};
+
+// Ingredients list plus, when the recipe says how many it serves, a stepper that rescales it.
+function ingredientsBlock(r, onChange) {
+  const block = el('div', { class: 'block' });
+  const head = el('h4', {}, 'Ingredients');
+  const list = el('ul', { class: 'ing-list' });
+  const note = el('div', { class: 'hint' });
+
+  function draw() {
+    list.innerHTML = '';
+    scaledIngredients(r).forEach(i => list.append(el('li', {}, el('span', {}, i))));
+    const want = scaleState[r.id] || r.servings;
+    note.textContent = (r.servings && want !== r.servings) ? `Scaled from ${r.servings}. Tap − or + to change.` : '';
+    if (onChange) onChange();
+  }
+
+  if (r.servings) {
+    const val = el('span', { class: 'serves-n' });
+    const set = n => {
+      scaleState[r.id] = Math.min(24, Math.max(1, n));
+      val.textContent = `Serves ${scaleState[r.id]}`;
+      draw();
+    };
+    const stepper = el('div', { class: 'stepper' },
+      el('button', { 'aria-label': 'Fewer servings', onclick: () => set((scaleState[r.id] || r.servings) - 1) }, '−'),
+      val,
+      el('button', { 'aria-label': 'More servings', onclick: () => set((scaleState[r.id] || r.servings) + 1) }, '+'),
+    );
+    val.textContent = `Serves ${scaleState[r.id] || r.servings}`;
+    block.append(el('div', { class: 'block-head' }, head, stepper));
+  } else {
+    block.append(head);
+  }
+  block.append(list, note);
+  draw();
+  return block;
+}
+
+// ---------- Cook mode ----------
+/* Full screen, one step at a time, screen kept awake. Finishing drops straight into
+   logging the cook, which is the whole point of the app. */
+let wakeLock = null;
+let cookKeys = null;
+async function keepAwake() {
+  try { if ('wakeLock' in navigator) wakeLock = await navigator.wakeLock.request('screen'); } catch {}
+}
+function letSleep() {
+  try { wakeLock && wakeLock.release(); } catch {}
+  wakeLock = null;
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && parseHash()[0] === 'cook' && !wakeLock) keepAwake();
+});
+function leaveCookMode() {
+  letSleep();
+  if (cookKeys) { document.removeEventListener('keydown', cookKeys); cookKeys = null; }
+}
+
+async function viewCook(id) {
+  const r = getRecipe(id);
+  const steps = (r?.method || []).filter(Boolean);
+  if (!r || !steps.length) { go('/recipe/' + (id || '')); return; }
+
+  let i = 0;
+  const ticked = new Set();
+  keepAwake();
+
+  const screen = el('div', { class: 'cook' });
+  const bar = el('i');
+  const counter = el('span', { class: 'cook-count' });
+  const stepText = el('p');
+  const prev = el('button', { class: 'btn ghost' }, 'Back');
+  const next = el('button', { class: 'btn' }, 'Next');
+
+  function draw() {
+    counter.textContent = `Step ${i + 1} of ${steps.length}`;
+    stepText.textContent = steps[i];
+    bar.style.width = ((i + 1) / steps.length * 100) + '%';
+    prev.disabled = i === 0;
+    next.textContent = i === steps.length - 1 ? 'Done — log this cook' : 'Next';
+    next.className = 'btn' + (i === steps.length - 1 ? ' dark' : '');
+  }
+  function move(d) {
+    if (d > 0 && i === steps.length - 1) {
+      leaveCookMode();
+      go('/recipe/' + r.id);
+      setTimeout(() => logCookSheet(r), 350);
+      return;
+    }
+    i = Math.min(steps.length - 1, Math.max(0, i + d));
+    draw();
+  }
+  prev.addEventListener('click', () => move(-1));
+  next.addEventListener('click', () => move(1));
+
+  cookKeys = e => {
+    if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); move(1); }
+    else if (e.key === 'ArrowLeft') move(-1);
+    else if (e.key === 'Escape') { leaveCookMode(); go('/recipe/' + r.id); }
+  };
+  document.addEventListener('keydown', cookKeys);
+
+  const ingBtn = el('button', { class: 'cook-ing' }, 'Ingredients');
+  ingBtn.addEventListener('click', () => openSheet((box, close) => {
+    const list = el('ul', { class: 'ing-list tickable' });
+    const lines = scaledIngredients(r);
+    lines.forEach((line, n) => {
+      const li = el('li', { class: ticked.has(n) ? 'done' : '' }, el('span', {}, line));
+      li.addEventListener('click', () => {
+        ticked.has(n) ? ticked.delete(n) : ticked.add(n);
+        li.classList.toggle('done');
+      });
+      list.append(li);
+    });
+    box.append(
+      sheetHead('Ingredients', r.servings ? `Serves ${scaleState[r.id] || r.servings}` : r.title),
+      el('div', { class: 'hint', style: 'margin:10px 0 0' }, 'Tap one to cross it off.'),
+      list,
+      el('div', { class: 'btn-row' }, el('button', { class: 'btn block', onclick: () => close() }, 'Back to cooking')),
+    );
+  }));
+
+  screen.append(
+    el('div', { class: 'cook-progress' }, bar),
+    el('div', { class: 'cook-top' },
+      el('div', {}, el('div', { class: 'cook-title' }, r.title), counter),
+      ingBtn,
+      el('button', { class: 'cook-x', 'aria-label': 'Stop cooking', onclick: () => { leaveCookMode(); go('/recipe/' + r.id); } }, '✕'),
+    ),
+    el('div', { class: 'cook-step' }, stepText),
+    el('div', { class: 'cook-nav' }, prev, next),
+  );
+  draw();
+  mount(screen, false);
 }
 
 // ---------- Share a recipe as a link ----------

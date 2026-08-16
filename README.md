@@ -53,6 +53,31 @@ python "C:\Users\tobia\Fiona CAN cook\site\devserver.py"
 Then open <http://127.0.0.1:8142>. The dev server sends no-cache headers so edits show up on
 every reload. Any static host works in production.
 
+## Cook mode & servings scaling
+
+**Cook mode** (`#/cook/:id`, "Start cooking" on any recipe with steps) goes full screen: one step
+at a time in large type, a progress bar, and the screen held awake via the Wake Lock API,
+re-acquired when the app comes back to the foreground. The ingredients are one tap away in a
+sheet where each line can be crossed off. Arrow keys and space work on a desktop, Escape leaves.
+The last step reads **"Done — log this cook"** and drops straight into the test log, which is the
+loop the whole app is built around.
+
+**Servings scaling** is a stepper on the ingredients heading; the stored recipe is never rewritten.
+Ingredients are free text, so only a quantity at the *start* of a line is touched — "Salt and
+pepper" and "Rice, to serve" are left alone. It understands `2`, `1.5`, `1/2`, `1 1/2`, `½`, `1½`
+and ranges like `2-3`, and rounds to what a cook would write:
+
+| | base (serves 2) | serves 6 | serves 1 |
+| --- | --- | --- | --- |
+| weights round to 5s | `750g potatoes` | `2250g` | `375g` |
+| counts never do | `12 anchovies` | `36` | `6` |
+| original spacing kept | `200g broccoli` | `600g` | `100g` |
+| fractions where they read better | `1 1/2 tsp honey` | `4½ tsp` | `¾ tsp` |
+| decimals for kg and litres | `1.5kg pork` | `4.5kg` | `0.75kg` |
+| ranges scale both ends | `2-3 garlic cloves` | `6–9` | `1–1½` |
+
+The chosen serving count carries into cook mode. It is per session, not saved.
+
 ## Sharing a recipe with someone else
 
 Two people have two separate cookbooks — browser storage never crosses a device. Suggestions
