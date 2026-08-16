@@ -1,6 +1,6 @@
 /* Service worker: network-first for the app shell (updates show on reload),
    cache-first for images. All recipe data lives in IndexedDB, not here. */
-const CACHE = 'fiona-can-cook-v1';
+const CACHE = 'fiona-can-cook-v2';
 const SHELL = [
   './', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icons/icon-180.png', './icons/icon-192.png', './icons/icon-512.png',
@@ -30,8 +30,11 @@ self.addEventListener('fetch', e => {
     })));
     return;
   }
+  // Network-first for the shell. `cache: 'no-cache'` makes the browser revalidate with the
+  // server (a cheap 304 when unchanged) instead of silently reusing GitHub Pages' 10-minute
+  // HTTP cache — without it a pushed update can keep serving the old app for minutes.
   e.respondWith(
-    fetch(req).then(res => {
+    fetch(new Request(req.url, { cache: 'no-cache', credentials: 'same-origin' })).then(res => {
       const copy = res.clone();
       caches.open(CACHE).then(c => c.put(req, copy)).catch(() => {});
       return res;
