@@ -53,6 +53,23 @@ python "C:\Users\tobia\Fiona CAN cook\site\devserver.py"
 Then open <http://127.0.0.1:8142>. The dev server sends no-cache headers so edits show up on
 every reload. Any static host works in production.
 
+## Backup & restore
+
+`#/backup` (reached from the footer link on the home screen). Everything lives in one browser's
+IndexedDB, which "clear site data" wipes without warning — so:
+
+- **Download backup** writes a single self-contained `.json` holding every recipe and every photo
+  (photos embedded as base64, so the file runs ~1.37x the size of the photos themselves). It is
+  assembled as an array of `Blob` chunks so the whole file is never one giant string in memory.
+- **Restore** reads that file back and offers two routes: **merge** (adds what is missing, keeps
+  whichever copy of a clashing recipe has the newer `updatedAt`, never deletes) or **replace**
+  (wipes local data and restores the backup exactly).
+- The home screen nudges when there are changes since the last backup; the date is tracked in
+  `localStorage` under `fcc_lastBackup`.
+
+It doubles as the way to move a cookbook **between devices** — browser storage never crosses an
+origin or a device, so export on one and restore on the other.
+
 ## Files
 
 | File | What it is |

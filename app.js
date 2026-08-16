@@ -252,6 +252,7 @@ async function render() {
     case 'new':      return viewForm(null);
     case 'edit':     return viewForm(arg);
     case 'search':   return viewSearch();
+    case 'backup':   return viewBackup();
     default:         return viewHome();
   }
 }
@@ -421,7 +422,15 @@ async function viewHome() {
     }
   }
 
-  body.append(el('p', { class: 'foot' }, 'Saved on this device'));
+  // a backup nudge, but only once there is something worth losing
+  const last = lastBackupAt();
+  const newest = state.recipes.reduce((m, r) => Math.max(m, r.updatedAt || 0), 0);
+  if (state.recipes.length && (!last || new Date(last).getTime() < newest)) {
+    body.append(el('a', { href: '#/backup', class: 'banner', style: 'margin-top:26px' },
+      last ? `Changes since your last backup — back up now` : 'Nothing is backed up yet. Keep a copy safe.'));
+  }
+  body.append(el('p', { class: 'foot' },
+    'Saved on this device · ', el('a', { href: '#/backup', style: 'color:var(--accent);font-weight:700' }, 'Backup')));
   wrap.append(hero, searchBox, body);
   mount(wrap, 'home');
 }
@@ -967,6 +976,210 @@ async function viewForm(id) {
   syncPhotoField();
   mount(wrap, editing ? '' : 'add');
   if (!editing) titleEl.focus();
+}
+
+// ---------- Backup & restore ----------
+/* Everything lives in this browser's IndexedDB, which a "clear site data" wipes without
+   warning. The backup is one self-contained JSON file: recipes plus every photo embedded
+   as base64. It doubles as the way to move a cookbook between devices, since browser
+   storage never crosses an origin or a device. */
+const LAST_BACKUP_KEY = 'fcc_lastBackup';
+const lastBackupAt = () => localStorage.getItem(LAST_BACKUP_KEY);
+
+function fmtBytes(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return Math.round(b / 1024) + ' KB';
+  return (b / 1048576).toFixed(1) + ' MB';
+}
+function blobToBase64(blob) {
+  return new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(String(fr.result).split(',')[1] || '');
+    fr.onerror = () => rej(fr.error);
+    fr.readAsDataURL(blob);
+  });
+}
+const base64ToBlob = (data, type) =>
+  fetch('data:' + (type || 'image/jpeg') + ';base64,' + data).then(r => r.blob());
+
+// Assembled as an array of chunks so the whole file never exists as one huge string —
+// a 60MB backup would otherwise be rough on a phone.
+async function buildBackupBlob(onProgress) {
+  const [recipes, photos] = await Promise.all([DB.getAll('recipes'), DB.getAll('photos')]);
+  const parts = ['{"app":"fiona-can-cook","version":1,"exportedAt":' +
+    JSON.stringify(new Date().toISOString()) +
+    ',"recipes":' + JSON.stringify(recipes) + ',"photos":['];
+  for (let i = 0; i < photos.length; i++) {
+    const data = await blobToBase64(photos[i].blob);
+    parts.push((i ? ',' : '') + JSON.stringify({ id: photos[i].id, type: photos[i].blob.type || 'image/jpeg', data }));
+    if (onProgress) onProgress(i + 1, photos.length);
+  }
+  parts.push(']}');
+  return { blob: new Blob(parts, { type: 'application/json' }), recipes: recipes.length, photos: photos.length };
+}
+
+async function viewBackup() {
+  const photos = await DB.getAll('photos').catch(() => []);
+  const photoBytes = photos.reduce((s, p) => s + p.blob.size, 0);
+  const est = Math.round(photoBytes * 1.37 + JSON.stringify(state.recipes).length);
+  const last = lastBackupAt();
+  const newest = state.recipes.reduce((m, r) => Math.max(m, r.updatedAt || 0), 0);
+  const stale = state.recipes.length && (!last || new Date(last).getTime() < newest);
+
+  const body = el('div', { class: 'wrap' });
+
+  body.append(el('div', { class: 'sec-h' }, 'On this device'),
+    el('div', { class: 'factbar' },
+      el('div', {}, el('span', { class: 'n' }, String(state.recipes.length)), el('span', { class: 'l' }, 'Recipes')),
+      el('div', {}, el('span', { class: 'n' }, String(photos.length)), el('span', { class: 'l' }, 'Photos')),
+      el('div', {}, el('span', { class: 'n' }, fmtBytes(est)), el('span', { class: 'l' }, 'Backup size')),
+    ));
+
+  body.append(el('div', { class: 'banner' + (stale ? '' : ' done') },
+    !state.recipes.length ? 'Nothing to back up yet.'
+      : !last ? 'Never backed up. One tap and it is safe.'
+      : stale ? `Last backup ${fmtDate(last)} — there are changes since.`
+      : `Backed up ${fmtDate(last)}. Nothing has changed since.`));
+
+  // export
+  const dlNote = el('div', { class: 'hint' });
+  const dl = el('button', { class: 'btn block' }, 'Download backup');
+  dl.addEventListener('click', async () => {
+    if (!state.recipes.length) { toast('No recipes to back up yet'); return; }
+    dl.disabled = true;
+    dlNote.textContent = 'Packing up…';
+    try {
+      const { blob, recipes, photos: np } = await buildBackupBlob((i, n) => {
+        dlNote.textContent = n ? `Packing photo ${i} of ${n}…` : 'Packing up…';
+      });
+      const name = `fiona-can-cook-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      const url = URL.createObjectURL(blob);
+      const a = el('a', { href: url, download: name });
+      document.body.append(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      localStorage.setItem(LAST_BACKUP_KEY, new Date().toISOString());
+      dlNote.textContent = `Saved ${name} — ${recipes} recipes, ${np} photos, ${fmtBytes(blob.size)}.`;
+      toast('Backup downloaded');
+    } catch (err) {
+      dlNote.textContent = 'Could not build the backup: ' + (err.message || err);
+    }
+    dl.disabled = false;
+  });
+  body.append(el('div', { class: 'sec-h' }, 'Back up'),
+    el('p', { class: 'foot', style: 'text-align:left;margin:0 0 12px' },
+      'Saves one file holding every recipe and photo. Keep it in iCloud, Drive or anywhere safe.'),
+    dl, dlNote);
+
+  // restore
+  const fileInput = el('input', { type: 'file', accept: 'application/json,.json' });
+  const dropText = el('span', {}, 'Choose a backup file');
+  const drop = el('label', { class: 'photo-drop' }, dropText, fileInput);
+  const rNote = el('div', { class: 'hint' });
+  fileInput.addEventListener('change', async () => {
+    const f = fileInput.files[0];
+    fileInput.value = '';
+    if (!f) return;
+    dropText.textContent = 'Reading…';
+    rNote.textContent = '';
+    try {
+      let data;
+      try { data = JSON.parse(await f.text()); }
+      catch { throw new Error('That file could not be read. Pick the .json backup file this app made.'); }
+      if (data.app !== 'fiona-can-cook' || !Array.isArray(data.recipes)) {
+        throw new Error('That is a different kind of file — it is not a Fiona CAN cook backup.');
+      }
+      restoreSheet(data, f);
+    } catch (err) {
+      rNote.textContent = err.message || 'Could not read that file.';
+    }
+    dropText.textContent = 'Choose a backup file';
+  });
+  body.append(el('div', { class: 'sec-h' }, 'Restore'),
+    el('p', { class: 'foot', style: 'text-align:left;margin:0 0 12px' },
+      'Open a backup file to bring a cookbook back, or to copy it onto another device.'),
+    drop, rNote);
+
+  body.append(el('p', { class: 'foot' },
+    'Recipes live only in this browser, on this device. They are not on the internet and nobody else can see them — which is also why a backup matters.'));
+
+  mount(el('div', {}, topbar('Backup', { back: true }), body), '');
+}
+
+function restoreSheet(data, file) {
+  const local = new Map(state.recipes.map(r => [r.id, r]));
+  let add = 0, upd = 0, keep = 0;
+  data.recipes.forEach(r => {
+    const l = local.get(r.id);
+    if (!l) add++;
+    else if ((r.updatedAt || 0) > (l.updatedAt || 0)) upd++;
+    else keep++;
+  });
+
+  openSheet((box, close) => {
+    const note = el('div', { class: 'hint' });
+    const merge = el('button', { class: 'btn block' }, 'Merge into this device');
+    const replace = el('button', { class: 'btn danger block' }, 'Replace everything');
+
+    async function run(mode) {
+      merge.disabled = replace.disabled = true;
+      try {
+        if (mode === 'replace') {
+          note.textContent = 'Clearing…';
+          for (const r of state.recipes) await DB.del('recipes', r.id);
+          for (const p of await DB.getAll('photos')) await DB.del('photos', p.id);
+          state.recipes = [];
+          state.photoURLs = {};
+          local.clear();
+        }
+        const photos = data.photos || [];
+        for (let i = 0; i < photos.length; i++) {
+          note.textContent = `Restoring photo ${i + 1} of ${photos.length}…`;
+          const existing = mode === 'replace' ? null : await DB.get('photos', photos[i].id);
+          if (!existing) await DB.put('photos', { id: photos[i].id, blob: await base64ToBlob(photos[i].data, photos[i].type) });
+        }
+        note.textContent = 'Restoring recipes…';
+        for (const r of data.recipes) {
+          const l = local.get(r.id);
+          if (mode === 'merge' && l && (l.updatedAt || 0) >= (r.updatedAt || 0)) continue;
+          await DB.put('recipes', r);
+        }
+        await loadData();
+        close();
+        toast(mode === 'replace' ? 'Everything restored' : `Merged — ${add} added, ${upd} updated`);
+        go('/');
+        render();
+      } catch (err) {
+        note.textContent = 'Restore failed: ' + (err.message || err);
+        merge.disabled = replace.disabled = false;
+      }
+    }
+    merge.addEventListener('click', () => run('merge'));
+    replace.addEventListener('click', () => run('replace'));
+
+    box.append(
+      sheetHead('Restore this backup?', file.name),
+      el('div', { class: 'factbar', style: 'margin-top:18px' },
+        el('div', {}, el('span', { class: 'n' }, String(data.recipes.length)), el('span', { class: 'l' }, 'Recipes')),
+        el('div', {}, el('span', { class: 'n' }, String((data.photos || []).length)), el('span', { class: 'l' }, 'Photos')),
+        el('div', {}, el('span', { class: 'n' }, fmtBytes(file.size)), el('span', { class: 'l' }, 'File')),
+      ),
+      el('p', { class: 'sub', style: 'margin-top:16px' }, data.exportedAt ? 'Taken ' + fmtDate(data.exportedAt) : ''),
+      el('div', { class: 'field' },
+        el('label', {}, 'Merge'),
+        el('div', { class: 'hint', style: 'margin:0 0 10px' },
+          `Adds ${add} new, updates ${upd} with a newer version, leaves ${keep} alone. Nothing is lost.`),
+        merge),
+      el('div', { class: 'field' },
+        el('label', {}, 'Or replace'),
+        el('div', { class: 'hint', style: 'margin:0 0 10px' },
+          state.recipes.length
+            ? `Wipes the ${state.recipes.length} recipe${state.recipes.length > 1 ? 's' : ''} already here and restores the backup exactly.`
+            : 'Nothing here yet, so this is the same as merging.'),
+        replace),
+      note,
+      el('div', { class: 'btn-row' }, el('button', { class: 'btn ghost block', onclick: () => close() }, 'Cancel')),
+    );
+  });
 }
 
 // ---------- Boot ----------
