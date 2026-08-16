@@ -253,6 +253,7 @@ async function render() {
     case 'edit':     return viewForm(arg);
     case 'search':   return viewSearch();
     case 'backup':   return viewBackup();
+    case 'shared':   return viewShared(arg);
     default:         return viewHome();
   }
 }
@@ -568,7 +569,8 @@ async function viewRecipe(id) {
   body.append(
     el('div', { class: 'kicker' },
       el('span', { class: 'pill ' + (isT ? 'testing' : 'approved') }, isT ? 'In testing' : 'In the cookbook'),
-      el('span', { class: 'pill' }, catById(r.category).name)),
+      el('span', { class: 'pill' }, catById(r.category).name),
+      r.sharedFrom ? el('span', { class: 'pill' }, 'From ' + r.sharedFrom) : ''),
     el('h2', {}, r.title),
   );
   if (r.story) body.append(el('p', { class: 'story' }, r.story));
@@ -622,6 +624,7 @@ async function viewRecipe(id) {
   const acts = el('div', { class: 'btn-row stack' });
   if (isT) acts.append(el('button', { class: 'btn block', onclick: () => approveSheet(r) }, 'Approve → move to cookbook'));
   else acts.append(el('button', { class: 'btn ghost block', onclick: () => sendBackToTesting(r) }, 'Send back to testing'));
+  acts.append(el('button', { class: 'btn ghost block', onclick: () => shareSheet(r) }, 'Send this recipe to someone'));
   acts.append(el('button', { class: 'btn danger block', onclick: () => deleteSheet(r) }, 'Delete recipe'));
   body.append(acts);
 
@@ -976,6 +979,171 @@ async function viewForm(id) {
   syncPhotoField();
   mount(wrap, editing ? '' : 'add');
   if (!editing) titleEl.focus();
+}
+
+// ---------- Share a recipe as a link ----------
+/* A suggestion travels as a link: the recipe is squeezed into the URL hash, so it never
+   touches a server and needs no account. Photos are left out on purpose — they keep the
+   link short, and in this app photos come from cooking rather than from writing a recipe
+   down. The id travels too, so re-sharing updates the same recipe instead of duplicating it. */
+const SHARE_NAME_KEY = 'fcc_shareName';
+
+function b64urlFromBytes(bytes) {
+  let bin = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function bytesFromB64url(s) {
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/'));
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+// 'z' = deflated, 'u' = plain — so an older browser without CompressionStream still works
+async function packShare(obj) {
+  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+  if (typeof CompressionStream === 'undefined') return 'u' + b64urlFromBytes(bytes);
+  const stream = new Blob([bytes]).stream().pipeThrough(new CompressionStream('deflate-raw'));
+  const buf = await new Response(stream).arrayBuffer();
+  return 'z' + b64urlFromBytes(new Uint8Array(buf));
+}
+async function unpackShare(s) {
+  const tag = s[0], bytes = bytesFromB64url(s.slice(1));
+  if (tag === 'u') return JSON.parse(new TextDecoder().decode(bytes));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return JSON.parse(await new Response(stream).text());
+}
+
+async function shareLinkFor(r, from) {
+  const payload = await packShare({
+    v: 1, id: r.id, t: r.title, c: r.category, m: r.time, s: r.servings,
+    y: r.story, i: r.ingredients || [], d: r.method || [], g: r.tags || [],
+    f: (from || '').trim() || undefined,
+  });
+  return location.origin + location.pathname + '#/shared/' + payload;
+}
+
+function shareSheet(r) {
+  openSheet((box, close) => {
+    const fromEl = el('input', { value: localStorage.getItem(SHARE_NAME_KEY) || '', placeholder: 'Your name (optional)' });
+    const linkEl = el('input', { readonly: 'readonly', value: 'Building link…' });
+    const note = el('div', { class: 'hint' });
+    let url = '';
+
+    async function build() {
+      url = await shareLinkFor(r, fromEl.value);
+      linkEl.value = url;
+      note.textContent = `${url.length} characters — short enough for any message.`;
+    }
+    fromEl.addEventListener('input', () => {
+      localStorage.setItem(SHARE_NAME_KEY, fromEl.value.trim());
+      build();
+    });
+    build();
+
+    const copy = el('button', { class: 'btn block' }, 'Copy link');
+    copy.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(url);
+        toast('Link copied');
+      } catch {
+        linkEl.select(); linkEl.setSelectionRange(0, 99999);
+        note.textContent = 'Press Ctrl+C (or long-press) to copy the selected link.';
+      }
+    });
+
+    const row = el('div', { class: 'btn-row stack' }, copy);
+    if (navigator.share) {
+      const nat = el('button', { class: 'btn ghost block' }, 'Send with…');
+      nat.addEventListener('click', () => navigator.share({ title: r.title, text: `Try this one: ${r.title}`, url }).catch(() => {}));
+      row.append(nat);
+    }
+    row.append(el('button', { class: 'btn ghost block', onclick: () => close() }, 'Done'));
+
+    box.append(
+      sheetHead('Send this recipe', r.title),
+      el('p', { class: 'sub', style: 'margin-top:10px' },
+        'Whoever opens the link gets it in their testing kitchen. Photos are not included — those come from cooking it.'),
+      el('div', { class: 'field' }, el('label', {}, 'From'), fromEl),
+      el('div', { class: 'field' }, el('label', {}, 'Link'), linkEl, note),
+      row,
+    );
+  });
+}
+
+async function viewShared(payload) {
+  const body = el('div', { class: 'wrap' });
+  const wrap = el('div', {}, topbar('A suggested recipe', { back: true }), body);
+
+  let d;
+  try {
+    d = await unpackShare(payload);
+    if (!d || !d.t) throw new Error('empty');
+  } catch {
+    body.append(emptyState('Link did not work',
+      'That link looks incomplete — messaging apps sometimes cut long links in half. Ask for it again, or paste the whole thing into the address bar.',
+      'Back home', '#/'));
+    mount(wrap, '');
+    return;
+  }
+
+  const existing = getRecipe(d.id);
+  body.append(el('div', { class: 'sec-h' }, d.f ? `Suggested by ${d.f}` : 'Suggested recipe'));
+  body.append(el('h2', { style: 'margin:0;font-size:26px;font-weight:800;letter-spacing:-.03em' }, d.t));
+
+  const meta = el('div', { class: 'rcard', style: 'border:0;padding:12px 0' },
+    el('div', { class: 'meta' },
+      fmtTime(d.m) ? el('span', { class: 'time' }, fmtTime(d.m)) : '',
+      el('span', { class: 'pill' }, catById(d.c).name),
+      d.s ? el('span', { class: 'pill' }, `Serves ${d.s}`) : ''));
+  body.append(meta);
+  if (d.y) body.append(el('p', { class: 'story' }, d.y));
+
+  if ((d.i || []).length) {
+    const ul = el('ul', { class: 'ing-list' });
+    d.i.forEach(i => ul.append(el('li', {}, el('span', {}, i))));
+    body.append(el('div', { class: 'block' }, el('h4', {}, 'Ingredients'), ul));
+  }
+  if ((d.d || []).length) {
+    const ol = el('ul', { class: 'steps' });
+    d.d.forEach(m => ol.append(el('li', {}, m)));
+    body.append(el('div', { class: 'block' }, el('h4', {}, 'Method'), ol));
+  }
+
+  async function save(asCopy) {
+    const id = asCopy ? slugify(d.t) + '-' + Math.random().toString(36).slice(2, 6) : d.id;
+    const now = new Date().toISOString();
+    const r = {
+      ...(asCopy ? {} : existing || {}),
+      id, title: d.t, status: existing && !asCopy ? existing.status : 'testing',
+      category: d.c || 'weeknight', time: d.m || null, servings: d.s || null,
+      story: d.y || '', ingredients: d.i || [], method: d.d || [], tags: d.g || [],
+      photos: (!asCopy && existing?.photos) || [],
+      attempts: (!asCopy && existing?.attempts) || [],
+      sharedFrom: d.f || null,
+      createdAt: (!asCopy && existing?.createdAt) || now,
+      approvedAt: (!asCopy && existing?.approvedAt) || null,
+    };
+    await saveRecipe(r);
+    toast(existing && !asCopy ? 'Your copy is updated' : 'Added to the testing kitchen');
+    go('/recipe/' + id);
+  }
+
+  const acts = el('div', { class: 'btn-row stack' });
+  if (existing) {
+    acts.append(
+      el('div', { class: 'banner' }, `You already have "${existing.title}". Updating keeps its test log.`),
+      el('button', { class: 'btn block', onclick: () => save(false) }, 'Update my copy'),
+      el('button', { class: 'btn ghost block', onclick: () => save(true) }, 'Add as a separate copy'),
+    );
+  } else {
+    acts.append(el('button', { class: 'btn block', onclick: () => save(false) }, 'Add to my testing kitchen'));
+  }
+  acts.append(el('a', { class: 'btn ghost block', href: '#/' }, 'Not now'));
+  body.append(acts);
+
+  mount(wrap, '');
 }
 
 // ---------- Backup & restore ----------

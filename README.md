@@ -53,6 +53,26 @@ python "C:\Users\tobia\Fiona CAN cook\site\devserver.py"
 Then open <http://127.0.0.1:8142>. The dev server sends no-cache headers so edits show up on
 every reload. Any static host works in production.
 
+## Sharing a recipe with someone else
+
+Two people have two separate cookbooks — browser storage never crosses a device. Suggestions
+travel as a **link** instead of needing a server or an account:
+
+- **Send this recipe** (on any recipe page) packs the recipe into the URL hash: compact JSON,
+  deflated via `CompressionStream`, base64url-encoded. A full recipe with 24 ingredients and
+  18 steps comes to about 550 characters, so it survives any messaging app.
+- Opening the link shows a read-only preview — "Suggested by …", ingredients, method — and drops
+  it into the **testing kitchen** on tap. Cooking, rating and approving then happen on that
+  person's own device, which is the point: the cook decides.
+- The recipe **id travels with the link**, so re-sending an updated version offers "Update my
+  copy" (keeping the recipient's test log, rating and status) rather than silently duplicating.
+  "Add as a separate copy" is there when a fork really is wanted.
+- Photos are deliberately left out: they keep links short, and in this app photos come from
+  cooking rather than from writing the recipe down.
+
+Nothing is uploaded — the recipe lives in the URL itself, so the link works between any two
+people with the app, and a mangled or truncated link fails with a plain explanation.
+
 ## Backup & restore
 
 `#/backup` (reached from the footer link on the home screen). Everything lives in one browser's
