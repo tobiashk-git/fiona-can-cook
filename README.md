@@ -30,6 +30,20 @@ blank, with a two-stage approval flow and a bright-minimal look.
   The full test log carries over to the approved recipe.
 - **Send back to testing** any time — nothing is lost.
 
+## Live
+
+**<https://tobiashk-git.github.io/fiona-can-cook/>** — repo `tobiashk-git/fiona-can-cook` (public).
+
+Only the app shell is hosted; recipes never leave the device. To install on an iPhone: open the
+link in Safari, then Share → Add to Home Screen. The service worker is network-first for the app
+shell, so pushing a change makes it appear on the next reload:
+
+```bash
+git add -A && git commit -m "..." && git push
+```
+
+Pages rebuilds in about a minute.
+
 ## Running it
 
 ```bash
